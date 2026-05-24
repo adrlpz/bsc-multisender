@@ -1,4 +1,50 @@
+// ABI for Multisender v1.1
+// Generated from contracts/src/Multisender.sol after audit fixes (M1/M2/M3 + L4)
 export const multisenderAbi = [
+  // ----- Read -----
+  {
+    type: "function",
+    name: "feeBps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint16" }],
+  },
+  {
+    type: "function",
+    name: "feeReceiver",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "MAX_RECIPIENTS_FREE",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "MAX_RECIPIENTS_STANDARD",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "MAX_FEE_BPS",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint16" }],
+  },
+  {
+    type: "function",
+    name: "owner",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  // ----- Write: send -----
   {
     type: "function",
     name: "multisendBNB",
@@ -17,23 +63,11 @@ export const multisenderAbi = [
       { name: "token", type: "address" },
       { name: "recipients", type: "address[]" },
       { name: "amounts", type: "uint256[]" },
+      { name: "maxFeeBps", type: "uint16" },
     ],
     outputs: [],
   },
-  {
-    type: "function",
-    name: "feeBps",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint16" }],
-  },
-  {
-    type: "function",
-    name: "feeReceiver",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "address" }],
-  },
+  // ----- Events -----
   {
     type: "event",
     name: "MultisendBNB",
@@ -54,6 +88,37 @@ export const multisenderAbi = [
       { indexed: false, name: "fee", type: "uint256" },
     ],
   },
+  // ----- Errors (custom) -----
+  { type: "error", name: "LengthMismatch", inputs: [] },
+  { type: "error", name: "NoRecipients", inputs: [] },
+  {
+    type: "error",
+    name: "TooManyRecipients",
+    inputs: [
+      { name: "provided", type: "uint256" },
+      { name: "max", type: "uint256" },
+    ],
+  },
+  { type: "error", name: "ZeroAmount", inputs: [{ name: "index", type: "uint256" }] },
+  { type: "error", name: "ZeroAddress", inputs: [{ name: "index", type: "uint256" }] },
+  {
+    type: "error",
+    name: "ValueMismatch",
+    inputs: [
+      { name: "sent", type: "uint256" },
+      { name: "expected", type: "uint256" },
+    ],
+  },
+  {
+    type: "error",
+    name: "FeeAboveMax",
+    inputs: [
+      { name: "actual", type: "uint16" },
+      { name: "max", type: "uint16" },
+    ],
+  },
+  { type: "error", name: "FeeOnTransferNotSupported", inputs: [] },
+  { type: "error", name: "BNBTransferFailed", inputs: [{ name: "recipient", type: "address" }] },
 ] as const;
 
 export const erc20Abi = [
