@@ -50,11 +50,11 @@
 - [ ] OG image + meta tags + sitemap
 - [ ] How-to-use docs page
 - [ ] Twitter thread + Telegram launch post
-- [ ] First 10 beta users (404NF holders)
+- [ ] First 10 beta users (manual outreach komunitas BSC)
 
 ### M5 — Iterate (Week 3+)
 - [ ] Permit2 integration (gasless approve)
-- [ ] EIP-7702 batched delegate (pattern reuse dari 404NF)
+- [ ] EIP-7702 batched delegate (gasless approve)
 - [ ] Gnosis Safe support
 - [ ] Address book + ENS resolver
 - [ ] Holder snapshot tool (fetch from token contract)

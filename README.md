@@ -23,10 +23,10 @@
 | **Network** | BNB Smart Chain (mainnet, chainId 56) + testnet (97) |
 | **Asset** | BNB native + semua BEP-20 token (USDT, USDC, BUSD, custom) |
 | **Mode** | Equal split / Custom amount per wallet / CSV upload |
-| **Max wallets** | 500 per tx (gas-bound), unlimited via batching |
+| **Max wallets** | 1000 per batch (Standard tier), 50 (Free tier) |
 | **UX** | 1 klik approve + 1 klik send (atau permit2 / EIP-7702 untuk gasless approve) |
 | **Auth** | Wallet connect (MetaMask, WalletConnect, Trust, OKX) |
-| **Fee model** | Optional 0.1% protocol fee (revenue) atau gratis untuk holder 404NF |
+| **Fee model** | Free: 0% (BNB, ≤50 recipients) · Standard: 0.1% capped at 0.5 BNB (all BEP-20, ≤1000 recipients) |
 
 ---
 
@@ -34,5 +34,5 @@
 
 1. **Airdrop ops** — tim crypto bayar mahal buat distro token (Disperse.app dulu charge fee, sekarang masih dipake puluhan ribu user).
 2. **Gas saving** — 1 tx vs N tx = potong gas 60-80%.
-3. **Hook ke 404NF** — holder dapet diskon → driver utility token.
-4. **Recurring use case** — payroll crypto, reward distro, marketing campaign.
+3. **Recurring use case** — payroll crypto, reward distro, marketing campaign.
+4. **Revenue clean** — 0.1% on Standard tier, capped 0.5 BNB. Predictable, no upsell trap.

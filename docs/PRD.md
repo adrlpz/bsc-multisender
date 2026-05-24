@@ -44,7 +44,7 @@ User butuh tool **non-custodial, 1-klik, audit-friendly** untuk kirim token mass
 ## 3. Goals & Success Metrics
 
 ### Product Goals
-1. User bisa kirim token ke 500 wallet dalam **<60 detik** (connect → confirm → done)
+1. User bisa kirim token ke 1000 wallet dalam **<90 detik** (connect → confirm → done)
 2. Gas saving minimum **60%** vs send manual satu-satu
 3. Zero custodial risk — semua tx user-signed, kontrak audit-able
 
@@ -54,8 +54,8 @@ User butuh tool **non-custodial, 1-klik, audit-friendly** untuk kirim token mass
 | Unique wallet users | 1,000+ |
 | Total batches sent | 5,000+ |
 | Total value distributed | $500K+ |
-| Protocol revenue (jika fee aktif) | $500-2,000/bulan |
-| 404NF holder activation | 30%+ of users hold 404NF |
+| Protocol revenue (Standard tier) | $1,000-3,000/bulan |
+| Free → Standard conversion | 20%+ |
 
 ---
 
@@ -72,7 +72,7 @@ User butuh tool **non-custodial, 1-klik, audit-friendly** untuk kirim token mass
 - Default: BNB native
 - Input custom BEP-20 contract address → fetch symbol + decimals + balance
 - Recent token list (cache di localStorage)
-- Whitelist common tokens: USDT, USDC, BUSD, CAKE, 404NF
+- Whitelist common tokens: USDT, USDC, BUSD, CAKE
 
 **FR-3: Recipient Input**
 - **Mode A — Manual paste:** textarea, format `address,amount` per baris (atau `address amount`, comma/space/tab separator)
@@ -93,7 +93,7 @@ User butuh tool **non-custodial, 1-klik, audit-friendly** untuk kirim token mass
 **FR-6: Send Transaction**
 - 1 klik → wallet popup → sign → broadcast
 - Loading state dengan tx hash, link ke BscScan
-- Auto-batch kalau >500 recipients (chunked, sequential confirm)
+- Auto-batch kalau >1000 recipients (chunked, sequential confirm)
 - Success: show summary + download receipt CSV
 
 **FR-7: History**
@@ -103,7 +103,7 @@ User butuh tool **non-custodial, 1-klik, audit-friendly** untuk kirim token mass
 ### 4.2 Nice-to-have (v1.1+)
 
 - **Permit2 / EIP-2612:** gasless approve via signature
-- **EIP-7702 batching:** delegated batch tx (pakai pattern dari 404NF)
+- **EIP-7702 batching:** delegated batch tx (gasless approve)
 - **Gnosis Safe support:** generate Safe transaction JSON
 - **Multi-chain:** Ethereum, Polygon, Arbitrum (later)
 - **Saved address books:** import/export
@@ -174,7 +174,7 @@ contract Multisender {
 - Use `unchecked` blocks for loop counters
 - Batch transfer pattern (no callback)
 - Skip self-transfers
-- Optional: holder benefit check via 404NF balance (gasless waiver)
+- Tier enforcement on-chain (max recipients per call sesuai tier yang dipanggil)
 
 ---
 
@@ -226,27 +226,31 @@ contract Multisender {
 
 ## 11. Pricing & Revenue Model
 
+Dua tier saja — simpel, transparan, no upsell trap.
+
+| Aspek | Free | Standard |
+|---|---|---|
+| Recipients per batch | up to **50** | up to **1000** |
+| Asset support | **BNB only** | **All BEP-20 tokens** (BNB + custom) |
+| Protocol fee | **0%** | **0.1%** (capped at **0.5 BNB**) |
+| Auth | wallet connect | wallet connect |
+| Target user | KOL kecil, casual giveaway | project ops, airdrop, payroll |
+
 ### Tier 1 — Free
-- Up to 50 recipients per batch
-- BNB only
-- No protocol fee
+- Up to **50** recipients per batch
+- **BNB only**
+- **No protocol fee**
 
-### Tier 2 — Standard (paid via tx)
-- Up to 500 recipients per batch
-- All BEP-20 tokens
-- 0.1% protocol fee (capped at 0.5 BNB)
+### Tier 2 — Standard
+- Up to **1000** recipients per batch
+- **All BEP-20 tokens** (USDT, USDC, BUSD, custom contract, dst)
+- **0.1% protocol fee, capped at 0.5 BNB** per batch
 
-### Tier 3 — 404NF Holder
-- All Standard features
-- **0% protocol fee** (utility hook)
-- Priority RPC
-- Higher batch limit (1000)
-
-### Tier 4 — Pro (B2B, future)
-- API access for project ops
-- Custom domain whitelabel
-- Dedicated RPC
-- Pricing: $99-499/month flat
+**Fee mechanics:**
+- Fee dipotong on-chain saat `multisendToken()` / `multisendBNB()` (BEP-20 batch via Standard).
+- Cap 0.5 BNB → batch besar (>500 BNB total) tetep ekonomis, ga linear.
+- Fee receiver = `feeReceiver` address (admin-set, transparan di kontrak).
+- Fee 0% saat launch (promo period 30 hari) — flip ke 0.1% via `setFee(10)` setelah validasi product-market fit.
 
 ---
 
@@ -259,6 +263,6 @@ contract Multisender {
 - [ ] OG image + meta tags
 - [ ] Documentation page (how-to-use)
 - [ ] Twitter announcement thread
-- [ ] Telegram post di komunitas BSC + 404NF
+- [ ] Telegram post di komunitas BSC
 - [ ] ProductHunt launch
 - [ ] Submit ke BSC ecosystem directory
