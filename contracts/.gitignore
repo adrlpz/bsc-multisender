@@ -1,0 +1,10 @@
+# Compiler artifacts
+cache/
+out/
+broadcast/
+
+# Docs
+docs/
+
+# Dotenv
+.env
