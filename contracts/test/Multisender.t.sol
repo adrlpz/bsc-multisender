@@ -16,6 +16,30 @@ contract MockERC20 is ERC20 {
     }
 }
 
+/// @dev Mock fee-on-transfer token: takes a 1% tax on every transfer (M1 test).
+contract MockFeeOnTransferERC20 is ERC20 {
+    uint256 public constant TAX_BPS = 100; // 1%
+    address public constant SINK = address(0xDEAD);
+
+    constructor() ERC20("FoT", "FOT") {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        // Mint paths and the sink itself bypass the tax.
+        if (from == address(0) || to == address(0) || from == SINK || to == SINK) {
+            super._update(from, to, value);
+            return;
+        }
+        uint256 tax = (value * TAX_BPS) / 10_000;
+        uint256 net = value - tax;
+        super._update(from, SINK, tax);
+        super._update(from, to, net);
+    }
+}
+
 contract MultisenderTest is Test {
     Multisender internal sender;
     MockERC20 internal token;
@@ -46,6 +70,13 @@ contract MultisenderTest is Test {
         for (uint256 i = 0; i < n; i++) {
             a[i] = each;
         }
+    }
+
+    /// @dev Helper: queue a rescue and warp past the delay.
+    function _queueAndWarp() internal {
+        vm.prank(owner);
+        sender.queueRescue();
+        vm.warp(block.timestamp + sender.rescueDelay() + 1);
     }
 
     // ---------------------------------------------------------------
@@ -141,8 +172,9 @@ contract MultisenderTest is Test {
         vm.prank(user);
         token.approve(address(sender), total + expectedFee);
 
+        uint16 maxFee = sender.feeBps();
         vm.prank(user);
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, maxFee);
 
         assertEq(token.balanceOf(r[0]), 1_000 ether);
         assertEq(token.balanceOf(r[1]), 2_000 ether);
@@ -162,7 +194,7 @@ contract MultisenderTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(Multisender.TooManyRecipients.selector, n, sender.MAX_RECIPIENTS_STANDARD())
         );
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, 100);
     }
 
     function testMultisendToken_feeCalculation() public {
@@ -182,8 +214,9 @@ contract MultisenderTest is Test {
         vm.prank(user);
         token.approve(address(sender), total + expectedFee);
 
+        uint16 maxFee = sender.feeBps();
         vm.prank(user);
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, maxFee);
 
         assertEq(token.balanceOf(feeReceiver), expectedFee);
     }
@@ -198,8 +231,9 @@ contract MultisenderTest is Test {
         vm.prank(user);
         token.approve(address(sender), 100 ether);
 
+        uint16 maxFee = sender.feeBps();
         vm.prank(user);
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, maxFee);
 
         assertEq(token.balanceOf(feeReceiver), 0);
         assertEq(token.balanceOf(r[0]), 100 ether);
@@ -211,7 +245,7 @@ contract MultisenderTest is Test {
 
         vm.prank(user);
         vm.expectRevert(Multisender.LengthMismatch.selector);
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, 100);
     }
 
     function testMultisendToken_revertOnZeroAmount() public {
@@ -226,7 +260,50 @@ contract MultisenderTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Multisender.ZeroAmount.selector, 1));
-        sender.multisendToken(address(token), r, a);
+        sender.multisendToken(address(token), r, a, 100);
+    }
+
+    // ---------------------------------------------------------------
+    // M2 — maxFeeBps slippage
+    // ---------------------------------------------------------------
+
+    function testMultisendToken_revertOnFeeAboveMax() public {
+        // Owner sets fee to 10 bps; user submits with maxFeeBps = 5 → revert.
+        vm.prank(owner);
+        sender.setFee(10);
+
+        address[] memory r = _makeRecipients(1);
+        uint256[] memory a = new uint256[](1);
+        a[0] = 100 ether;
+
+        token.mint(user, 1_000 ether);
+        vm.prank(user);
+        token.approve(address(sender), 1_000 ether);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Multisender.FeeAboveMax.selector, uint16(10), uint16(5)));
+        sender.multisendToken(address(token), r, a, 5);
+    }
+
+    // ---------------------------------------------------------------
+    // M1 — fee-on-transfer rejection
+    // ---------------------------------------------------------------
+
+    function testMultisendToken_revertOnFeeOnTransferToken() public {
+        MockFeeOnTransferERC20 fot = new MockFeeOnTransferERC20();
+
+        address[] memory r = _makeRecipients(1);
+        uint256[] memory a = new uint256[](1);
+        a[0] = 100 ether;
+
+        fot.mint(user, 1_000 ether);
+        vm.prank(user);
+        fot.approve(address(sender), 1_000 ether);
+
+        uint16 maxFee = sender.feeBps();
+        vm.prank(user);
+        vm.expectRevert(Multisender.FeeOnTransferNotSupported.selector);
+        sender.multisendToken(address(fot), r, a, maxFee);
     }
 
     // ---------------------------------------------------------------
@@ -268,6 +345,10 @@ contract MultisenderTest is Test {
         sender.setFeeReceiver(address(0));
     }
 
+    // ---------------------------------------------------------------
+    // M3 — rescue timelock
+    // ---------------------------------------------------------------
+
     function testRescueToken() public {
         // Simulate stuck tokens.
         token.mint(address(sender), 1_000 ether);
@@ -276,6 +357,7 @@ contract MultisenderTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         sender.rescueToken(address(token), 1_000 ether);
 
+        _queueAndWarp();
         vm.prank(owner);
         sender.rescueToken(address(token), 1_000 ether);
         assertEq(token.balanceOf(owner), 1_000 ether);
@@ -288,10 +370,87 @@ contract MultisenderTest is Test {
         sd.boom(payable(address(sender)));
         assertEq(address(sender).balance, 5 ether);
 
+        _queueAndWarp();
         vm.prank(owner);
         sender.rescueBNB(5 ether);
         assertEq(owner.balance, 5 ether);
         assertEq(address(sender).balance, 0);
+    }
+
+    function testRescue_revertWithoutQueue() public {
+        token.mint(address(sender), 1_000 ether);
+        vm.prank(owner);
+        vm.expectRevert(Multisender.RescueNotReady.selector);
+        sender.rescueToken(address(token), 1_000 ether);
+    }
+
+    function testRescue_revertBeforeDelay() public {
+        token.mint(address(sender), 1_000 ether);
+        vm.prank(owner);
+        sender.queueRescue();
+        // 23h is short of the 24h delay.
+        vm.warp(block.timestamp + 23 hours);
+        vm.prank(owner);
+        vm.expectRevert(Multisender.RescueNotReady.selector);
+        sender.rescueToken(address(token), 1_000 ether);
+    }
+
+    function testRescue_succeedsAfterDelay() public {
+        token.mint(address(sender), 1_000 ether);
+        vm.prank(owner);
+        sender.queueRescue();
+        vm.warp(block.timestamp + 24 hours + 1);
+        vm.prank(owner);
+        sender.rescueToken(address(token), 1_000 ether);
+        assertEq(token.balanceOf(owner), 1_000 ether);
+    }
+
+    function testRescue_resetsQueueAfterExecution() public {
+        token.mint(address(sender), 2_000 ether);
+
+        // First rescue: queue → warp → execute.
+        _queueAndWarp();
+        vm.prank(owner);
+        sender.rescueToken(address(token), 1_000 ether);
+        assertEq(sender.rescueQueuedAt(), 0);
+
+        // Second rescue without re-queueing must revert.
+        vm.prank(owner);
+        vm.expectRevert(Multisender.RescueNotReady.selector);
+        sender.rescueToken(address(token), 1_000 ether);
+    }
+
+    function testQueueRescue_revertIfAlreadyQueued() public {
+        vm.prank(owner);
+        sender.queueRescue();
+        vm.prank(owner);
+        vm.expectRevert(Multisender.RescueAlreadyQueued.selector);
+        sender.queueRescue();
+    }
+
+    // ---------------------------------------------------------------
+    // L4 — Ownable2Step
+    // ---------------------------------------------------------------
+
+    function testOwnership_twoStepTransfer() public {
+        address newOwner = address(0xB0B);
+
+        // Step 1: current owner initiates transfer (pendingOwner is set, owner unchanged).
+        vm.prank(owner);
+        sender.transferOwnership(newOwner);
+        assertEq(sender.owner(), owner, "owner should not change until accept");
+        assertEq(sender.pendingOwner(), newOwner, "pendingOwner must be set");
+
+        // Random caller can't accept.
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        sender.acceptOwnership();
+
+        // Step 2: new owner accepts.
+        vm.prank(newOwner);
+        sender.acceptOwnership();
+        assertEq(sender.owner(), newOwner, "ownership should transfer after accept");
+        assertEq(sender.pendingOwner(), address(0), "pendingOwner must reset");
     }
 
     function testReceive_revertsOnDirectBNB() public {

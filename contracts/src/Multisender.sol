@@ -2,16 +2,30 @@
 pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title Multisender
 /// @notice Non-custodial batch transfer of BNB and BEP-20 tokens on BSC.
-/// @dev Two tiers:
+/// @dev v1.1.0 — audit fixes M1/M2/M3, Ownable2Step (L4).
+///       Two tiers:
 ///       - Free tier: `multisendBNB` (≤ MAX_RECIPIENTS_FREE, no protocol fee).
 ///       - Standard tier: `multisendToken` (≤ MAX_RECIPIENTS_STANDARD, fee = totalAmount * feeBps / 10_000).
 ///       Tokens are pulled from the sender via SafeERC20 (sender must `approve` the contract first).
+///
+///       v1.1 changes:
+///         - L4: Ownable2Step — ownership transfer is now two-step (transferOwnership + acceptOwnership).
+///         - M2: `multisendToken` accepts `maxFeeBps` slippage guard. Reverts if current `feeBps`
+///               exceeds caller-supplied max. Frontend should pass the value of `feeBps()` read at
+///               quote time for zero-slippage protection against a front-running `setFee` call.
+///         - M3: `rescueToken` / `rescueBNB` require `queueRescue()` + a 24h `rescueDelay` to elapse.
+///               After execution, the queue is reset to enforce per-rescue commitment.
+///         - M1: Fee-on-transfer / rebasing tokens are explicitly unsupported. `multisendToken`
+///               verifies `balanceOf(recipient)` increases by exactly `amt` post-transfer; mismatched
+///               deltas revert with `FeeOnTransferNotSupported`. This adds gas (one SLOAD per
+///               recipient) but guarantees recipients receive exactly the promised amount.
 ///
 ///       Simplification vs PRD §11: the PRD describes a "0.1% capped at 0.5 BNB" fee for the Standard
 ///       tier across all assets. Implementing a BNB-denominated cap on arbitrary BEP-20 tokens
@@ -20,7 +34,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///         - charge the protocol fee in the same token on `multisendToken` (no cap).
 ///       `FEE_CAP` is exported as a public constant for future BNB-variant use; it is NOT applied
 ///       in this version. See CONTRACTS.md for the rationale.
-contract Multisender is Ownable, ReentrancyGuard {
+contract Multisender is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
@@ -49,6 +63,12 @@ contract Multisender is Ownable, ReentrancyGuard {
     /// @notice Address that receives protocol fees.
     address public feeReceiver;
 
+    /// @notice Mandatory delay between `queueRescue()` and a rescue execution (M3).
+    uint256 public rescueDelay = 24 hours;
+
+    /// @notice Timestamp at which the most recent rescue was queued. `0` means no queue.
+    uint256 public rescueQueuedAt;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -63,6 +83,12 @@ contract Multisender is Ownable, ReentrancyGuard {
     );
     event FeeUpdated(uint16 oldFeeBps, uint16 newFeeBps);
     event FeeReceiverUpdated(address indexed oldReceiver, address indexed newReceiver);
+
+    /// @notice Emitted when an admin queues a rescue. `readyAt` is the earliest timestamp at which
+    ///         `rescueToken` / `rescueBNB` will succeed.
+    event RescueQueued(uint256 readyAt);
+    /// @notice Emitted when a rescue executes. `token == address(0)` for BNB rescues.
+    event RescueExecuted(address token, uint256 amount);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -79,11 +105,20 @@ contract Multisender is Ownable, ReentrancyGuard {
     error BNBTransferFailed(address recipient);
     error InsufficientBNB();
 
+    /// @notice M2: current `feeBps` exceeds the caller-provided slippage cap.
+    error FeeAboveMax(uint16 actual, uint16 max);
+    /// @notice M3: rescue called without a queue, or before `rescueQueuedAt + rescueDelay`.
+    error RescueNotReady();
+    /// @notice M3: a rescue is already queued.
+    error RescueAlreadyQueued();
+    /// @notice M1: token took a transfer fee or rebased — recipient delta does not match the requested amount.
+    error FeeOnTransferNotSupported();
+
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
 
-    /// @param _owner            Initial contract owner.
+    /// @param _owner            Initial contract owner. Ownership transfer is two-step (Ownable2Step).
     /// @param _feeReceiver      Address that receives protocol fees.
     /// @param _feeBps           Initial fee in basis points (≤ MAX_FEE_BPS).
     constructor(address _owner, address _feeReceiver, uint16 _feeBps) Ownable(_owner) {
@@ -142,18 +177,33 @@ contract Multisender is Ownable, ReentrancyGuard {
     /// @notice Send a BEP-20 token to many recipients in one tx. Standard tier.
     /// @dev Fee is charged in the same token: `fee = totalAmount * feeBps / 10_000` (no BNB cap).
     ///      Sender must approve this contract for `totalAmount + fee` (or use infinite approval).
+    ///
+    ///      M1: Fee-on-transfer / rebasing tokens are NOT supported. After each `safeTransferFrom`
+    ///      we verify `balanceOf(to)` increased by exactly `amt`; any deviation reverts with
+    ///      `FeeOnTransferNotSupported`. This costs one extra SLOAD per recipient but guarantees
+    ///      recipients receive the exact amount.
+    ///
+    ///      M2: `maxFeeBps` is a caller-supplied slippage guard. Pass the value of `feeBps()` read
+    ///      at quote time for zero slippage. If a `setFee` lands before this tx, the call reverts
+    ///      instead of silently overcharging.
     /// @param token      BEP-20 token address.
     /// @param recipients Recipient addresses.
     /// @param amounts    Amount per recipient.
+    /// @param maxFeeBps  Maximum acceptable `feeBps` (slippage cap).
     function multisendToken(
         address token,
         address[] calldata recipients,
-        uint256[] calldata amounts
+        uint256[] calldata amounts,
+        uint16 maxFeeBps
     ) external nonReentrant {
         uint256 len = recipients.length;
         if (len != amounts.length) revert LengthMismatch();
         if (len == 0) revert NoRecipients();
         if (len > MAX_RECIPIENTS_STANDARD) revert TooManyRecipients(len, MAX_RECIPIENTS_STANDARD);
+
+        // M2: slippage guard — refuse if owner front-ran a setFee.
+        uint16 currentFeeBps = feeBps;
+        if (currentFeeBps > maxFeeBps) revert FeeAboveMax(currentFeeBps, maxFeeBps);
 
         IERC20 erc20 = IERC20(token);
 
@@ -164,7 +214,10 @@ contract Multisender is Ownable, ReentrancyGuard {
             if (to == address(0)) revert ZeroAddress(i);
             if (amt == 0) revert ZeroAmount(i);
 
+            // M1: balance-delta check — fee-on-transfer / rebasing tokens revert.
+            uint256 beforeBal = erc20.balanceOf(to);
             erc20.safeTransferFrom(msg.sender, to, amt);
+            if (erc20.balanceOf(to) - beforeBal != amt) revert FeeOnTransferNotSupported();
 
             unchecked {
                 total += amt;
@@ -173,8 +226,8 @@ contract Multisender is Ownable, ReentrancyGuard {
         }
 
         uint256 fee;
-        if (feeBps != 0) {
-            fee = (total * feeBps) / 10_000;
+        if (currentFeeBps != 0) {
+            fee = (total * currentFeeBps) / 10_000;
             if (fee != 0) {
                 erc20.safeTransferFrom(msg.sender, feeReceiver, fee);
             }
@@ -203,17 +256,37 @@ contract Multisender is Ownable, ReentrancyGuard {
         emit FeeReceiverUpdated(old, _receiver);
     }
 
+    /// @notice M3: Queue a rescue. Must be called before `rescueToken` / `rescueBNB`. After the
+    ///         24h `rescueDelay` elapses, exactly one rescue may execute; the queue is then reset.
+    function queueRescue() external onlyOwner {
+        if (rescueQueuedAt != 0) revert RescueAlreadyQueued();
+        rescueQueuedAt = block.timestamp;
+        emit RescueQueued(block.timestamp + rescueDelay);
+    }
+
     /// @notice Emergency: rescue tokens stuck in this contract.
     /// @dev The contract is transit-only by design; this exists for accidental direct transfers.
+    ///      M3: requires a prior `queueRescue()` and `rescueDelay` to have elapsed.
     function rescueToken(address token, uint256 amount) external onlyOwner {
+        if (rescueQueuedAt == 0 || block.timestamp < rescueQueuedAt + rescueDelay) {
+            revert RescueNotReady();
+        }
+        rescueQueuedAt = 0;
         IERC20(token).safeTransfer(owner(), amount);
+        emit RescueExecuted(token, amount);
     }
 
     /// @notice Emergency: rescue BNB stuck in this contract.
+    /// @dev M3: requires a prior `queueRescue()` and `rescueDelay` to have elapsed.
     function rescueBNB(uint256 amount) external onlyOwner {
+        if (rescueQueuedAt == 0 || block.timestamp < rescueQueuedAt + rescueDelay) {
+            revert RescueNotReady();
+        }
         if (amount > address(this).balance) revert InsufficientBNB();
+        rescueQueuedAt = 0;
         (bool ok,) = owner().call{value: amount}("");
         if (!ok) revert BNBTransferFailed(owner());
+        emit RescueExecuted(address(0), amount);
     }
 
     /// @notice Reject stray BNB (only accepted via `multisendBNB`).
