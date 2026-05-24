@@ -9,7 +9,20 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /// @title Multisender
 /// @notice Non-custodial batch transfer of BNB and BEP-20 tokens on BSC.
-/// @dev v1.1.0 — audit fixes M1/M2/M3, Ownable2Step (L4).
+/// @dev v1.1.1 — adversarial-pass low-risk hardening on top of v1.1 (no ABI change).
+///       v1.1.0 — audit fixes M1/M2/M3, Ownable2Step (L4).
+///
+///       Adversarial considerations (see docs/AUDIT-V2.md):
+///         - Reentrancy on `multisendBNB` / `multisendToken`: blocked by `nonReentrant` and the
+///           pull-pattern. Token transfers are atomic; BNB sends use a low-level call but the
+///           guard prevents re-entering either entrypoint mid-loop.
+///         - Front-running `setFee`: defeated by the `maxFeeBps` slippage cap (M2 fix).
+///         - Owner griefing via `setFee` / rescue: capped at `MAX_FEE_BPS` (1%) and gated by the
+///           24h `rescueDelay` (M3 fix). Owner is expected to be a multisig.
+///         - Fee-on-transfer / rebasing tokens: rejected by the post-transfer balance-delta check
+///           (M1 fix).
+///         - Out-of-gas griefing by a malicious recipient: the whole tx reverts atomically;
+///           recipients earlier in the batch are not paid until the tx succeeds.
 ///       Two tiers:
 ///       - Free tier: `multisendBNB` (≤ MAX_RECIPIENTS_FREE, no protocol fee).
 ///       - Standard tier: `multisendToken` (≤ MAX_RECIPIENTS_STANDARD, fee = totalAmount * feeBps / 10_000).
@@ -64,7 +77,12 @@ contract Multisender is Ownable2Step, ReentrancyGuard {
     address public feeReceiver;
 
     /// @notice Mandatory delay between `queueRescue()` and a rescue execution (M3).
-    uint256 public rescueDelay = 24 hours;
+    /// @dev v1.1.1: declared `constant` (was a mutable storage var in v1.1). The value is fixed
+    ///      at 24h and never changed on-chain, so promoting it to `constant` removes a SLOAD per
+    ///      rescue check and aligns the source with reality (Slither `constable-states`).
+    ///      The auto-generated `rescueDelay()` getter still exists and returns the same value, so
+    ///      no off-chain caller breaks.
+    uint256 public constant rescueDelay = 24 hours;
 
     /// @notice Timestamp at which the most recent rescue was queued. `0` means no queue.
     uint256 public rescueQueuedAt;
@@ -88,7 +106,9 @@ contract Multisender is Ownable2Step, ReentrancyGuard {
     ///         `rescueToken` / `rescueBNB` will succeed.
     event RescueQueued(uint256 readyAt);
     /// @notice Emitted when a rescue executes. `token == address(0)` for BNB rescues.
-    event RescueExecuted(address token, uint256 amount);
+    /// @dev v1.1.1: `token` is now `indexed` so off-chain indexers can filter rescue events per
+    ///      asset. Event name and arg order are unchanged; the topic count goes from 1 to 2.
+    event RescueExecuted(address indexed token, uint256 amount);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -267,26 +287,32 @@ contract Multisender is Ownable2Step, ReentrancyGuard {
     /// @notice Emergency: rescue tokens stuck in this contract.
     /// @dev The contract is transit-only by design; this exists for accidental direct transfers.
     ///      M3: requires a prior `queueRescue()` and `rescueDelay` to have elapsed.
+    ///
+    ///      v1.1.1 (CEI): `RescueExecuted` is emitted BEFORE the external token call. Re-entry is
+    ///      additionally blocked by resetting `rescueQueuedAt` to 0 before the call — a malicious
+    ///      token hook that re-enters `rescueToken` / `rescueBNB` hits `RescueNotReady`.
     function rescueToken(address token, uint256 amount) external onlyOwner {
         if (rescueQueuedAt == 0 || block.timestamp < rescueQueuedAt + rescueDelay) {
             revert RescueNotReady();
         }
         rescueQueuedAt = 0;
-        IERC20(token).safeTransfer(owner(), amount);
         emit RescueExecuted(token, amount);
+        IERC20(token).safeTransfer(owner(), amount);
     }
 
     /// @notice Emergency: rescue BNB stuck in this contract.
     /// @dev M3: requires a prior `queueRescue()` and `rescueDelay` to have elapsed.
+    ///      v1.1.1 (CEI): event emitted BEFORE the external `call`. Re-entry is blocked by the
+    ///      `rescueQueuedAt = 0` write that precedes both the event and the call.
     function rescueBNB(uint256 amount) external onlyOwner {
         if (rescueQueuedAt == 0 || block.timestamp < rescueQueuedAt + rescueDelay) {
             revert RescueNotReady();
         }
         if (amount > address(this).balance) revert InsufficientBNB();
         rescueQueuedAt = 0;
+        emit RescueExecuted(address(0), amount);
         (bool ok,) = owner().call{value: amount}("");
         if (!ok) revert BNBTransferFailed(owner());
-        emit RescueExecuted(address(0), amount);
     }
 
     /// @notice Reject stray BNB (only accepted via `multisendBNB`).
